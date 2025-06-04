@@ -1,3 +1,9 @@
+import {
+  FaceDetector,
+  FilesetResolver,
+  DrawingUtils
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
 // Elementos DOM
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -5,73 +11,105 @@ const ctx = canvas.getContext('2d');
 const startBtn = document.getElementById('startBtn');
 const detectBtn = document.getElementById('detectBtn');
 const statusDiv = document.getElementById('status');
+const cameraSelect = document.getElementById('cameraSelect');
 
 // Variáveis de estado
-let faceDetector, poseDetector;
-let isDetecting = false;
+let faceDetector;
 let stream = null;
+let isDetecting = false;
+let availableCameras = [];
+let lastVideoTime = -1;
+let animationFrameId;
+const drawingUtils = new DrawingUtils(ctx);
 
-// 1. Configurar detectores
-async function setupDetectors() {
-  const mp = {
-    FaceDetection: window.facedetection?.FaceDetection || window.FaceDetection,
-    Pose: window.pose?.Pose || window.Pose,
-    DrawingUtils: window.DrawingUtils,
-    POSE_CONNECTIONS: window.POSE_CONNECTIONS
-  };
-
-  // Face Detection
-  faceDetector = new mp.FaceDetection({
-    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
-  });
-  await faceDetector.setOptions({
-    selfieMode: true,
-    modelSelection: 0,
-    minDetectionConfidence: 0.5
-  });
-
-  // Pose Detection (para tronco)
-  poseDetector = new mp.Pose({
-    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
-  });
-  await poseDetector.setOptions({
-    modelComplexity: 1,
-    smoothLandmarks: true,
-    minDetectionConfidence: 0.5
-  });
-
-  // Callbacks para resultados
-  faceDetector.onResults(handleFaceResults);
-  poseDetector.onResults(handlePoseResults);
-
-  statusDiv.textContent = "Modelos carregados!";
-  detectBtn.disabled = false;
+// 1. Configurar detector de faces
+async function setupDetector() {
+  try {
+    statusDiv.textContent = "Carregando modelos...";
+    
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+    );
+    
+    faceDetector = await FaceDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`,
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO" // Modo vídeo para detecção contínua
+    });
+    
+    statusDiv.textContent = "Modelo carregado!";
+    detectBtn.disabled = false;
+    
+  } catch (error) {
+    console.error("Erro ao configurar detector:", error);
+    statusDiv.textContent = `Erro: ${error.message}`;
+    detectBtn.disabled = true;
+  }
 }
 
-// 2. Iniciar câmera
+// 2. Listar câmeras disponíveis
+async function populateCameraSelect() {
+  try {
+    cameraSelect.innerHTML = '';
+    
+    availableCameras = (await navigator.mediaDevices.enumerateDevices())
+      .filter(device => device.kind === 'videoinput');
+    
+    if (availableCameras.length === 0) {
+      cameraSelect.innerHTML = '<option value="">Nenhuma câmera encontrada</option>';
+      startBtn.disabled = true;
+      statusDiv.textContent = "Nenhuma câmera detectada";
+      return;
+    }
+    
+    availableCameras.forEach((camera, index) => {
+      const option = document.createElement('option');
+      option.value = index;
+      option.text = camera.label || `Câmera ${index + 1}`;
+      cameraSelect.appendChild(option);
+    });
+
+    startBtn.disabled = false;
+    statusDiv.textContent = `${availableCameras.length} câmera(s) detectada(s)`;
+
+  } catch (error) {
+    console.error("Erro ao listar câmeras:", error);
+    statusDiv.textContent = "Erro ao acessar dispositivos";
+    startBtn.disabled = true;
+  }
+}
+
+// 3. Iniciar câmera selecionada
 async function startCamera() {
   try {
     statusDiv.textContent = "Iniciando câmera...";
     startBtn.disabled = true;
+    detectBtn.disabled = true;
 
-    // Verifica se a API de mídia é suportada
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error("Seu navegador não suporta acesso à câmera.");
+    const selectedCameraIndex = cameraSelect.value;
+    
+    if (!availableCameras[selectedCameraIndex]) {
+      throw new Error("Selecione uma câmera válida");
     }
 
-    // Tenta acessar a câmera
+    // Encerrar stream anterior se existir
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         width: { ideal: 640 },
         height: { ideal: 480 },
-        facingMode: "user" // Usa a câmera frontal
+        deviceId: availableCameras[selectedCameraIndex].deviceId
       },
       audio: false
     });
 
     video.srcObject = stream;
 
-    // Espera o vídeo estar pronto
     await new Promise((resolve) => {
       video.onloadedmetadata = () => {
         canvas.width = video.videoWidth;
@@ -81,7 +119,7 @@ async function startCamera() {
     });
 
     video.play();
-    statusDiv.textContent = "Câmera ativa!";
+    statusDiv.textContent = `Câmera ativa! Usando: ${availableCameras[selectedCameraIndex].label || 'Câmera'}`;
     detectBtn.disabled = false;
 
   } catch (error) {
@@ -89,79 +127,97 @@ async function startCamera() {
     console.error("Erro detalhado:", error);
     startBtn.disabled = false;
 
-    // Mensagens específicas para erros comuns
     if (error.name === "NotAllowedError") {
-      statusDiv.textContent = "Permissão da câmera negada. Atualize a página e clique em 'Permitir'.";
+      statusDiv.textContent = "Permissão negada. Atualize e clique em 'Permitir'.";
     } else if (error.name === "NotFoundError") {
-      statusDiv.textContent = "Nenhuma câmera encontrada.";
+      statusDiv.textContent = "Câmera não encontrada.";
+    } else if (error.name === "NotReadableError") {
+      statusDiv.textContent = "Câmera em uso por outro app.";
     }
   }
 }
 
-// 3. Processar resultados do rosto
-function handleFaceResults(results) {
-  if (!isDetecting) return;
-  
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
-  
-  if (results.detections) {
-    window.DrawingUtils.drawDetections(ctx, results.detections, {
-      color: '#00FFFF',
-      lineWidth: 2,
-      radius: 4
-    });
-  }
-}
-
-// 4. Processar resultados do tronco
-function handlePoseResults(results) {
-  if (!isDetecting) return;
-  
-  if (results.poseLandmarks) {
-    // Desenhar pontos do tronco (magenta)
-    window.DrawingUtils.drawLandmarks(ctx, results.poseLandmarks, {
-      color: '#FF00FF',
-      radius: 4
-    });
-    
-    // Conexões personalizadas para o tronco
-    const TORSO_CONNECTIONS = [
-      [11, 12], [11, 13], [12, 14],  // Ombros e braços
-      [11, 23], [12, 24], [23, 24],   // Tronco
-      [23, 25], [24, 26]              // Quadris
-    ];
-    
-    window.DrawingUtils.drawConnectors(
-      ctx,
-      results.poseLandmarks,
-      TORSO_CONNECTIONS,
-      { color: '#00FF00', lineWidth: 3 }
-    );
-  }
-}
-
-// 5. Loop de detecção
+// 4. Função de detecção principal
 function detect() {
-  if (!isDetecting) return;
+  if (!isDetecting || !faceDetector) return;
   
-  faceDetector.send({ image: video });
-  poseDetector.send({ image: video });
+  const startTimeMs = performance.now();
   
-  requestAnimationFrame(detect);
+  // Só processar se o vídeo tiver tempo novo
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    
+    // Limpar canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Desenhar frame do vídeo
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // Detectar faces
+    const detections = faceDetector.detectForVideo(video, startTimeMs).detections;
+    
+    // Desenhar detecções
+    drawDetections(detections);
+  }
+  
+  animationFrameId = requestAnimationFrame(detect);
 }
+
+// 5. Desenhar detecções no canvas
+function drawDetections(detections) {
+  for (const detection of detections) {
+    const box = detection.boundingBox;
+
+    // Desenhar caixa delimitadora
+    ctx.strokeStyle = '#00FFFF';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(box.originX, box.originY, box.width, box.height);
+
+    // Desenhar pontos faciais
+    if (detection.keypoints) {
+      for (const keypoint of detection.keypoints) {
+        ctx.beginPath();
+        ctx.arc(keypoint.x, keypoint.y, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = '#FF00FF';
+        ctx.fill();
+      }
+    }
+
+    // Mostrar confiança
+    if (detection.categories && detection.categories[0]) {
+      const score = Math.round(detection.categories[0].score * 100);
+      ctx.fillStyle = '#00FF00';
+      ctx.font = '16px Arial';
+      ctx.fillText(
+        `${score}%`,
+        box.originX + 5,
+        box.originY + 20
+      );
+    }
+  }
+}
+
 
 // Event Listeners
+document.addEventListener('DOMContentLoaded', () => {
+  populateCameraSelect();
+  setupDetector();
+});
+
 startBtn.addEventListener('click', startCamera);
-detectBtn.addEventListener('click', async () => {
+
+detectBtn.addEventListener('click', () => {
   if (!isDetecting) {
-    await setupDetectors();
     isDetecting = true;
     detectBtn.textContent = "Parar Detecção";
     detect();
   } else {
     isDetecting = false;
     detectBtn.textContent = "Iniciar Detecção";
+    cancelAnimationFrame(animationFrameId);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 });
+
+// Atualizar lista de câmeras quando dispositivos mudarem
+navigator.mediaDevices.addEventListener('devicechange', populateCameraSelect);

@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Detecção de Rosto e Tronco - MediaPipe</title>
+  <title>Detecção de Rosto - MediaPipe</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <h1>Detecção de Rosto e Tronco</h1>
+  <h1>Detecção de Rosto com MediaPipe</h1>
   
   <div class="container">
     <video id="video" autoplay muted playsinline></video>
@@ -15,19 +15,14 @@
   </div>
   
   <div class="controls">
+    <select id="cameraSelect" style="padding: 8px; margin-right: 10px;"></select>
     <button id="startBtn">Iniciar Câmera</button>
     <button id="detectBtn" disabled>Iniciar Detecção</button>
   </div>
   
   <div id="status">Status: Aguardando inicialização...</div>
 
-  <!-- Scripts MediaPipe -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
-
-  <!-- Nosso script -->
-  <script src="app.js"></script>
+  <!-- Importar diretamente o módulo ES -->
+  <script type="module" src="app.js"></script>
 </body>
 </html>
