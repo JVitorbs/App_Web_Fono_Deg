@@ -1,7 +1,7 @@
+// Importação dos módulos do MediaPipe
 import {
-  FaceDetector,
-  FilesetResolver,
-  DrawingUtils
+  FaceLandmarker,
+  FilesetResolver
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
 
 // Elementos DOM
@@ -14,56 +14,57 @@ const statusDiv = document.getElementById('status');
 const cameraSelect = document.getElementById('cameraSelect');
 
 // Variáveis de estado
-let faceDetector;
+let faceLandmarker;
 let stream = null;
 let isDetecting = false;
 let availableCameras = [];
 let lastVideoTime = -1;
 let animationFrameId;
-const drawingUtils = new DrawingUtils(ctx);
 
-// 1. Configurar detector de faces
-async function setupDetector() {
+// Configurar FaceLandmarker
+async function setupFaceLandmarker() {
   try {
     statusDiv.textContent = "Carregando modelos...";
-    
+
     const vision = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
     );
-    
-    faceDetector = await FaceDetector.createFromOptions(vision, {
+
+    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
       baseOptions: {
-        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`,
-        delegate: "GPU"
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        delegate: "GPU",
       },
-      runningMode: "VIDEO" // Modo vídeo para detecção contínua
+      outputFaceBlendshapes: false,
+      runningMode: "VIDEO",
+      numFaces: 1
     });
-    
+
     statusDiv.textContent = "Modelo carregado!";
     detectBtn.disabled = false;
-    
   } catch (error) {
-    console.error("Erro ao configurar detector:", error);
+    console.error("Erro ao configurar FaceLandmarker:", error);
     statusDiv.textContent = `Erro: ${error.message}`;
     detectBtn.disabled = true;
   }
 }
 
-// 2. Listar câmeras disponíveis
+// Listar câmeras
 async function populateCameraSelect() {
   try {
     cameraSelect.innerHTML = '';
-    
+
     availableCameras = (await navigator.mediaDevices.enumerateDevices())
       .filter(device => device.kind === 'videoinput');
-    
+
     if (availableCameras.length === 0) {
       cameraSelect.innerHTML = '<option value="">Nenhuma câmera encontrada</option>';
       startBtn.disabled = true;
       statusDiv.textContent = "Nenhuma câmera detectada";
       return;
     }
-    
+
     availableCameras.forEach((camera, index) => {
       const option = document.createElement('option');
       option.value = index;
@@ -81,7 +82,7 @@ async function populateCameraSelect() {
   }
 }
 
-// 3. Iniciar câmera selecionada
+// Iniciar câmera
 async function startCamera() {
   try {
     statusDiv.textContent = "Iniciando câmera...";
@@ -89,12 +90,11 @@ async function startCamera() {
     detectBtn.disabled = true;
 
     const selectedCameraIndex = cameraSelect.value;
-    
+
     if (!availableCameras[selectedCameraIndex]) {
       throw new Error("Selecione uma câmera válida");
     }
 
-    // Encerrar stream anterior se existir
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
     }
@@ -137,71 +137,98 @@ async function startCamera() {
   }
 }
 
-// 4. Função de detecção principal
+// Função de detecção
 function detect() {
-  if (!isDetecting || !faceDetector) return;
-  
+  if (!isDetecting || !faceLandmarker) return;
+
   const startTimeMs = performance.now();
-  
-  // Só processar se o vídeo tiver tempo novo
+
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
-    
-    // Limpar canvas
+
+    const results = faceLandmarker.detectForVideo(video, startTimeMs);
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Desenhar frame do vídeo
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    // Detectar faces
-    const detections = faceDetector.detectForVideo(video, startTimeMs).detections;
-    
-    // Desenhar detecções
-    drawDetections(detections);
+
+    if (results.faceLandmarks.length > 0) {
+      drawLandmarks(results.faceLandmarks[0]);
+      checkHeadTilt(results.faceLandmarks[0]);
+    }
   }
-  
+
   animationFrameId = requestAnimationFrame(detect);
 }
 
-// 5. Desenhar detecções no canvas
-function drawDetections(detections) {
-  for (const detection of detections) {
-    const box = detection.boundingBox;
+// Desenhar pontos no rosto
+function drawLandmarks(landmarks) {
+  ctx.fillStyle = '#00FFFF';
+  for (const point of landmarks) {
+    ctx.beginPath();
+    ctx.arc(point.x * canvas.width, point.y * canvas.height, 2, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+}
 
-    // Desenhar caixa delimitadora
-    ctx.strokeStyle = '#00FFFF';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(box.originX, box.originY, box.width, box.height);
+// Áudio
+const engulaAudio = new Audio('audio/engula_audio.mp3');
 
-    // Desenhar pontos faciais
-    if (detection.keypoints) {
-      for (const keypoint of detection.keypoints) {
-        ctx.beginPath();
-        ctx.arc(keypoint.x, keypoint.y, 4, 0, 2 * Math.PI);
-        ctx.fillStyle = '#FF00FF';
-        ctx.fill();
+// Variáveis de controle do tempo
+let tiltStartTime = null;
+const tiltThreshold = 75;       // Limite de ângulo
+const holdDuration = 1000;      // Tempo necessário em ms (1 segundo)
+let audioPlayed = false;        // Controle para não tocar várias vezes
+
+// Detectar inclinação (para deglutição)
+function checkHeadTilt(landmarks) {
+  const noseTip = landmarks[1];   // Ponta do nariz
+  const chin = landmarks[152];    // Queixo
+
+  const noseY = noseTip.y * canvas.height;
+  const chinY = chin.y * canvas.height;
+
+  const diffY = chinY - noseY;   // Diferença vertical
+
+  // Mostrar valor de diferença na tela
+  ctx.fillStyle = '#00FF00';
+  ctx.font = '18px Arial';
+  ctx.fillText(`Diferença Y: ${Math.round(diffY)}`, 10, 30);
+
+  const now = Date.now();
+
+  if (diffY < tiltThreshold) {
+    if (!tiltStartTime) {
+      tiltStartTime = now; // Começa a contar
+      audioPlayed = false; // Reseta áudio
+    }
+
+    const elapsed = now - tiltStartTime;
+
+    if (elapsed >= holdDuration) {
+      ctx.fillStyle = 'red';
+      ctx.font = '24px Arial';
+      ctx.fillText("Engula!", canvas.width / 2 - 50, 50);
+
+      if (!audioPlayed) {
+        engulaAudio.play();
+        audioPlayed = true;
       }
     }
 
-    // Mostrar confiança
-    if (detection.categories && detection.categories[0]) {
-      const score = Math.round(detection.categories[0].score * 100);
-      ctx.fillStyle = '#00FF00';
-      ctx.font = '16px Arial';
-      ctx.fillText(
-        `${score}%`,
-        box.originX + 5,
-        box.originY + 20
-      );
-    }
+  } else {
+    // Se saiu da posição, zera o contador e permite tocar novamente
+    tiltStartTime = null;
+    audioPlayed = false;
   }
 }
+
+
 
 
 // Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
   populateCameraSelect();
-  setupDetector();
+  setupFaceLandmarker();
 });
 
 startBtn.addEventListener('click', startCamera);
@@ -219,5 +246,4 @@ detectBtn.addEventListener('click', () => {
   }
 });
 
-// Atualizar lista de câmeras quando dispositivos mudarem
 navigator.mediaDevices.addEventListener('devicechange', populateCameraSelect);
